@@ -1,3 +1,9 @@
+guest-templates (0.1-2ubuntu1) oneiric; urgency=low
+
+  * Ubuntu Oneiric stamp
+
+ -- Mike McClurg <mike.mcclurg@citrix.com>  Tue, 06 Dec 2011 21:06:37 +0000
+
 guest-templates (0.1-2) unstable; urgency=low
 
   * Fix an issue where the path was incorrect
