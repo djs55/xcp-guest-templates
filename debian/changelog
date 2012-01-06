@@ -1,3 +1,9 @@
+guest-templates (0.1.1-1) unstable; urgency=low
+
+  * Upstream version bump
+
+ -- Mike McClurg <mike.mcclurg@citrix.com>  Fri, 06 Jan 2012 17:53:47 +0000
+
 guest-templates (0.1-4) unstable; urgency=low
 
   * Remove postinst script
