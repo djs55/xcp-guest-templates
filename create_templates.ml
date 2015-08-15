@@ -1,34 +1,43 @@
 (*
- * Copyright (C) Citrix Systems Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published
- * by the Free Software Foundation; version 2.1 only. with the special
- * exception on linking described in file LICENSE.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
+ * Copyright (c) 2013 Citrix Systems Inc.
+ * All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, 
+ * with or without modification, are permitted provided 
+ * that the following conditions are met:
+ * 
+ * *   Redistributions of source code must retain the above 
+ *     copyright notice, this list of conditions and the 
+ *     following disclaimer.
+ * *   Redistributions in binary form must reproduce the above 
+ *     copyright notice, this list of conditions and the 
+ *     following disclaimer in the documentation and/or other 
+ *     materials provided with the distribution.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND 
+ * CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, 
+ * INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE 
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR 
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, 
+ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR 
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS 
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+ * WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING 
+ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE 
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF 
+ * SUCH DAMAGE.
  *)
+
 (** Code to create a set of built-in templates (eg on the fakeserver).
  * @group Virtual-Machine Management
  *)
 
-let never = "19700101T00:00:00Z"
 open API
+open Xstringext
 
-open Stringext
-module X = Xen_api_lwt_unix
-
-module Ref = struct
-	include Ref
-	let null = "OpaqueRef:NULL"
-end
-
-
-
-module D = Debug.Debugger(struct let name="xapi" end)
+module D = Debug.Make(struct let name="xapi" end)
 open D
 let ( ** ) a b = Int64.mul a b
 let kib = 1024L
@@ -41,9 +50,10 @@ let viridian_key_name = "viridian"
 let default_viridian_key_value = "true"
 
 let viridian_flag = viridian_key_name, default_viridian_key_value
+let viridian_time_ref_count_flag = ("viridian_time_ref_count","true")
 let nx_flag = ("nx","true")
 let no_nx_flag = ("nx","false")
-let base_platform_flags = ["acpi","1";"apic","true";"pae","true"]
+let base_platform_flags = ["acpi","1";"apic","true";"pae","true";"hpet","true"]
 
 let default_template_key = "default_template"
 let linux_template_key = "linux_template"
@@ -70,7 +80,7 @@ type disk = { device: string; (** device inside the guest eg xvda *)
 	      size: int64;    (** size in bytes *)
 	      sr: string;     (** name or UUID of the SR in which to make the disk *)
 	      bootable: bool;
-	      _type: vdi_type
+	      _type: API.vdi_type
 	    }
 
 let vdi_type2string = function
@@ -88,89 +98,41 @@ let xml_of_disk disk =
 let xml_of_disks disks = Xml.Element("provision", [], List.map xml_of_disk disks)
 
 (* template restrictions (added to recommendations field for UI) *)
-let recommendations ?(memory=128) ?(vcpus=16) ?(vbds=7) ?(vifs=7) () =
+let recommendations ?(memory=128) ?(vcpus=16) ?(vbds=16) ?(vifs=7) ?(fields=[]) () =
   let ( ** ) = Int64.mul in
     "<restrictions>"
     ^"<restriction field=\"memory-static-max\" max=\""^(Int64.to_string ((Int64.of_int memory) ** 1024L ** 1024L ** 1024L))^"\" />"
     ^"<restriction field=\"vcpus-max\" max=\""^(string_of_int vcpus)^"\" />"
     ^"<restriction property=\"number-of-vbds\" max=\""^(string_of_int vbds)^"\" />"
     ^"<restriction property=\"number-of-vifs\" max=\""^(string_of_int vifs)^"\" />"
+    ^(String.concat "" (List.map (fun (field, value) -> "<restriction field=\"" ^ field ^ "\" value=\"" ^ value ^ "\" />") fields))
     ^"</restrictions>"
 
 
+open Client
+
 let find_or_create_template x rpc session_id = 
-  lwt all = X.VM.get_by_name_label rpc session_id x.vM_name_label in
+  let all = Client.VM.get_by_name_label rpc session_id x.vM_name_label in
   (* CA-30238: Filter out _default templates_ *)
-  lwt all = Lwt_list.filter_p (fun self -> X.VM.get_is_a_template rpc session_id self) all in
-  lwt all = Lwt_list.filter_p (fun self -> lwt oc = X.VM.get_other_config rpc session_id self in Lwt.return (List.mem default_template oc)) all in
+  let all = List.filter (fun self -> Client.VM.get_is_a_template rpc session_id self) all in
+  let all = List.filter (fun self -> List.mem default_template (Client.VM.get_other_config rpc session_id self)) all in
   if all = []
-  then X.VM.create_from_record rpc session_id x
-  else Lwt.return (List.hd all)
+  then Client.VM.create_from_record rpc session_id x
+  else List.hd all
 
 let version_of_tools_vdi rpc session_id vdi =
-  lwt sm_config = X.VDI.get_sm_config rpc session_id vdi in
+  let sm_config = Client.VDI.get_sm_config rpc session_id vdi in
   let version = List.assoc "xs-tools-version" sm_config in
   let build = 
     if List.mem_assoc "xs-tools-build" sm_config 
     then int_of_string (List.assoc "xs-tools-build" sm_config) else 0 in
-  Lwt.return (match List.map int_of_string (String.split '.' version) with
+  match List.map int_of_string (String.split '.' version) with
   | [ major; minor; micro ] -> major, minor, micro, build
-  | _                       -> 0, 0, 0, build) (* only if filename is malformed *)
+  | _                       -> 0, 0, 0, build (* only if filename is malformed *)
 
 (* From Miami GA onward we identify the tools SR with the SR.other_config key: *)
 let tools_sr_tag = "xenserver_tools_sr"
 
-(** Return a reference to a VDI in the XenSource Tools SR, identified by its 
-    sm-config keys. We always invoke an SR.scan to be sure in the upgrade
-    case we find the latest version of the VDI. Nb. we require the tools VDI
-    to have sm-config keys: 'xs-tools=true' and 'xs-tools-version=x.y.z' where
-    x,y,z are numbers. If the tools VDI has key 'xs-tools-build=b' then this is
-    used to distinguish between builds of the tools VDI.  *)
-let find_xs_tools_vdi rpc session_id = 
-  (* Find the SR first *)
-  lwt srs = X.SR.get_all rpc session_id in
-  lwt srs = Lwt_list.filter_p (fun sr -> lwt oc = X.SR.get_other_config rpc session_id sr in
-				   Lwt.return (List.mem_assoc tools_sr_tag oc)
-				   ) srs in
-  
-  let find_vdi sr = 
-    lwt () = begin 
-      try
-	X.SR.scan rpc session_id sr
-      with e ->
-	error "Scan of tools SR failed - exception was '%s'" (Printexc.to_string e);
-	error "Ignoring error and continuing";
-        Lwt.return ()
-    end in
-    
-    lwt vdis = X.SR.get_VDIs rpc session_id sr in
-    begin 
-	lwt res = Lwt_list.filter_p (fun self -> 
-	  lwt sm_config = X.VDI.get_sm_config rpc session_id self in
-	  Lwt.return (try List.assoc "xs-tools" sm_config = "true" with _ -> false)) vdis in
-        match res with
-	  | [] -> Lwt.return None
-	  | [ vdi ] -> Lwt.return (Some vdi)
-	  | vdis -> 
-              lwt l = Lwt_list.map_p (fun x -> lwt v = version_of_tools_vdi rpc session_id x in Lwt.return (x,v)) vdis in
-	      let sorted = List.sort 
-		(fun (vdi1,x1) (vdi2,x2) ->
-		  let major1, minor1, micro1, build1 = x1 in
-		  let major2, minor2, micro2, build2 = x2 in
-		  0 +
-		    8 * (compare major1 major2) +
-		    4 * (compare minor1 minor2) +
-		    2 * (compare micro1 micro2) +
-		    1 * (compare build1 build2)
-		) l in
-	      let newest = List.hd (List.rev sorted) in
-              Lwt.return (Some (fst newest))
-    end in
-  match srs with
-    | [] -> warn "No Tools SR could be found"; Lwt.return None
-    | [ sr ] -> find_vdi sr
-    | sr::_ -> warn "Multiple Tools SRs detected, choosing one at random"; find_vdi sr
-	
 (** Values of memory parameters for templates. *)
 type template_memory_parameters = {
 	memory_static_min_mib : int64;
@@ -200,7 +162,7 @@ let blank_template memory = {
 	vM_transportable_snapshot_id = "";
 	vM_parent = Ref.null;
 	vM_children = [];
-	vM_snapshot_time = never;
+	vM_snapshot_time = Date.never;
 	vM_snapshot_info = [];
 	vM_snapshot_metadata = "";
 	vM_memory_overhead = (0L ** mib);
@@ -230,6 +192,8 @@ let blank_template memory = {
 	vM_is_control_domain = false;
 	vM_ha_restart_priority = "";
 	vM_ha_always_run = false;
+	vM_hardware_platform_version = 0L;
+	vM_auto_update_drivers = false;
 
 	(* These are ignored by the create call but required by the record type *)
 	vM_uuid = "Invalid";
@@ -265,6 +229,7 @@ let blank_template memory = {
 	vM_VGPUs = [];
 	vM_attached_PCIs = [];
 	vM_version = 0L;
+	vM_generation_id = "";
 }
 
 let other_install_media_template memory = 
@@ -274,8 +239,8 @@ let other_install_media_template memory =
 	vM_name_description =
 		"Template which allows VM installation from install media";
 	vM_PV_bootloader = ""; 
-	vM_HVM_boot_policy = "BIOS order";
-	vM_HVM_boot_params = [ "order", "dc" ];
+	vM_HVM_boot_policy = Constants.hvm_boot_policy_bios_order;
+	vM_HVM_boot_params = [ Constants.hvm_boot_params_order, "dc" ];
 	vM_platform = nx_flag :: base_platform_flags @ [ viridian_flag ];
 	vM_other_config = [ install_methods_otherconfig_key, "cdrom" ];
 }
@@ -316,13 +281,12 @@ let demo_xgt_template rpc session_id name_label short_name_label demo_xgt_name p
 	let script = post_install_dir ^ post_install_script in
 	let xgt = demo_xgt_dir ^ demo_xgt_name in
 	let xgt_installed = try Unix.access xgt [ Unix.F_OK ]; true with _ -> false in
-	if not(xgt_installed) then begin
-		debug "Skipping %s template because post install script is missing" name_label;
-	        Lwt.return ()
-        end else begin
+	if not(xgt_installed) then
+		debug "Skipping %s template because post install script is missing" name_label
+	else begin
 		let root = { device = "0"; size = (4L ** gib); sr = preferred_sr; bootable = true; _type = `system } 
 		and swap = { device = "1"; size = (512L ** mib); sr = preferred_sr; bootable = false; _type = `system } in
-		lwt (_: ref_VM) =
+		let (_: API.ref_VM) =
 			find_or_create_template 
 			{ (blank_template (default_memory_parameters 128L)) with
 				vM_name_label = name_label;
@@ -337,7 +301,7 @@ let demo_xgt_template rpc session_id name_label short_name_label demo_xgt_name p
 					install_methods_otherconfig_key, ""
 				]
 			} rpc session_id in
-			Lwt.return ()
+			()
 	end
 
 
@@ -352,21 +316,20 @@ type hvm_template_flags =
 	| XenApp
 	| Viridian
 	| StdVga
+	| WindowsUpdate
 
 type architecture =
 	| X32
 	| X64
 	| X64_debianlike
-	| X64_sol
 
 let friendly_string_of_architecture = function
 	| X32 -> " (32-bit)"
 	| X64 | X64_debianlike -> " (64-bit)"
-	| X64_sol -> ""	
 
 let technical_string_of_architecture = function
 	| X32 -> "i386"
-	| X64 | X64_sol -> "x86_64"
+	| X64 -> "x86_64"
 	| X64_debianlike -> "amd64"
 
 let make_long_name name architecture is_experimental =
@@ -375,8 +338,10 @@ let make_long_name name architecture is_experimental =
 
 let hvm_template
 		name architecture ?(is_experimental=false)
+		?(generation_id=false)
 		minimum_supported_memory_mib
 		root_disk_size_gib
+		maximum_supported_memory_gib
 		flags 
 		device_id =
 	let root = {
@@ -386,11 +351,6 @@ let hvm_template
 		bootable = false;
 		_type = `system
 	} in
-	let maximum_supported_memory_gib = match architecture with
-		| X32 -> 64
-		| X64 | X64_sol -> 128 
-		| X64_debianlike -> assert false
-	in
 	let base = other_install_media_template
 		(default_memory_parameters (Int64.of_int minimum_supported_memory_mib)) in
 	let xen_app = List.mem XenApp flags in
@@ -399,7 +359,7 @@ let hvm_template
 		(make_long_name name architecture is_experimental) in
 	let platform_flags = base_platform_flags
 		@ (if List.mem StdVga flags then ["vga","std";"videoram","8"] else [])
-		@ (if List.mem Viridian flags then [ viridian_flag ] else [])
+		@ (if List.mem Viridian flags then [ viridian_flag;viridian_time_ref_count_flag ] else [])
 		@ (if device_id <> "" then [ "device_id", device_id ] else []) in
 	{
 		base with
@@ -420,6 +380,8 @@ let hvm_template
 		vM_HVM_shadow_multiplier =
 			(if xen_app then 4.0 else base.vM_HVM_shadow_multiplier);
 		vM_recommendations = (recommendations ~memory:maximum_supported_memory_gib ());
+		vM_generation_id = if generation_id then "0:0" else "";
+		vM_auto_update_drivers = List.mem WindowsUpdate flags;
 	}
 
 (* machine-address-size key-name/value; goes in other-config of RHEL5.2 template *)
@@ -442,11 +404,11 @@ let rhel4x_template name architecture ?(is_experimental=false) flags =
 		vM_recommendations = recommendations ~memory:16 ~vifs:3 ();
 	}
 
-let rhel5x_template name architecture ?(is_experimental=false) flags =
+let rhel5x_template name architecture ?(is_experimental=false) ?(max_vcpus=32) flags =
 	let maximum_supported_memory_gib = match architecture with
 		| X32 -> 16
 		| X64 -> 16
-		| X64_sol | X64_debianlike -> assert false
+		| X64_debianlike -> assert false
 	in
 	let name = make_long_name name architecture is_experimental in
 	let bt = eli_install_template (default_memory_parameters 512L) name "rhlike" true "graphical utf8" in
@@ -456,14 +418,14 @@ let rhel5x_template name architecture ?(is_experimental=false) flags =
 		else [] in
 	{ bt with
 		vM_other_config = (install_methods_otherconfig_key, "cdrom,nfs,http,ftp") :: ("rhel5","true") :: m_a_s @ bt.vM_other_config;
-		vM_recommendations = recommendations ~memory:maximum_supported_memory_gib ();
+		vM_recommendations = recommendations ~memory:maximum_supported_memory_gib ~vcpus:max_vcpus ();
 	}
 
-let oracle_template name architecture ?(is_experimental=false) flags =
+let oracle_template name architecture ?(is_experimental=false) ?(max_vcpus=32) flags =
 	let maximum_supported_memory_gib = match architecture with
 		| X32 -> 64
 		| X64 -> 128
-		| X64_sol | X64_debianlike -> assert false
+		| X64_debianlike -> assert false
 	in
 	let name = make_long_name name architecture is_experimental in
 	let bt = eli_install_template (default_memory_parameters 512L) name "rhlike" true "graphical utf8" in
@@ -473,14 +435,14 @@ let oracle_template name architecture ?(is_experimental=false) flags =
 		else [] in
 	{ bt with 
 		vM_other_config = (install_methods_otherconfig_key, "cdrom,nfs,http,ftp") :: ("rhel5","true") :: m_a_s @ bt.vM_other_config;
-		vM_recommendations = recommendations ~memory:maximum_supported_memory_gib ();
+		vM_recommendations = recommendations ~memory:maximum_supported_memory_gib ~vcpus:max_vcpus ();
 	}
 
-let rhel6x_template name architecture ?(is_experimental=false) flags =
+let rhel6x_template name architecture ?(is_experimental=false) ?(max_vcpus=32) flags =
 	let maximum_supported_memory_gib = match architecture with
 		| X32 -> 16
 		| X64 -> 128
-		| X64_sol | X64_debianlike -> assert false
+		| X64_debianlike -> assert false
 	in
 	let name = make_long_name name architecture is_experimental in
 	let bt = eli_install_template (default_memory_parameters 512L) name "rhlike" true "graphical utf8" in
@@ -490,27 +452,65 @@ let rhel6x_template name architecture ?(is_experimental=false) flags =
 		else [] in
 	{ bt with 
 		vM_other_config = (install_methods_otherconfig_key, "cdrom,nfs,http,ftp") :: ("rhel6","true") :: m_a_s @ bt.vM_other_config;
-		vM_recommendations = recommendations ~memory:maximum_supported_memory_gib ();
+		vM_recommendations = recommendations ~memory:maximum_supported_memory_gib ~vcpus:max_vcpus ();
 	}
 
-let sles_9_template name architecture ?(is_experimental=false) flags =
-	let maximum_supported_memory_gib = match architecture with
-		| X32 -> 16
-		| X64 | X64_sol | X64_debianlike -> assert false
-	in
-	let name = make_long_name name architecture is_experimental in
-	let install_arch = technical_string_of_architecture architecture in
-	let bt = eli_install_template (default_memory_parameters 256L) name "sleslike" true "console=ttyS0 xencons=ttyS" in
-	{ bt with 
-		vM_other_config = (install_methods_otherconfig_key, "nfs,http,ftp") :: ("install-arch",install_arch) :: bt.vM_other_config;
-		vM_recommendations = recommendations ~memory:maximum_supported_memory_gib ~vifs:3 ();
-	}
+type memory =
+| MiB of int
+| GiB of int
+
+let to_mib memory = 
+  match memory with
+  | MiB m -> m
+  | GiB g -> g * 1024
+
+let to_gib memory =
+  match memory with
+  | MiB m -> m / 1024
+  | GiB g -> g
+    
+let hvm_linux_template
+    name ?(is_experimental=false)
+    min_memory
+    max_memory
+    root_disk_size =
+  let root = {
+    device = "0";
+    size = Int64.of_int (to_gib root_disk_size) ** gib;
+    sr = preferred_sr;
+    bootable = true;
+    _type = `system
+  } in
+  let base = other_install_media_template
+    (default_memory_parameters (Int64.of_int (to_mib min_memory))) in
+  let name = if is_experimental then name ^ " (experimental)" else name in
+  let platform_flags = base_platform_flags
+    @ (["vga","std";"videoram","8"])
+    @ [nx_flag]
+    @ (["viridian", "false"])
+    @ ([ "device_id", "0001" ])
+  in
+  let max_memory_gib = to_gib max_memory in
+  {
+    base with
+      vM_name_label = name;
+      vM_name_description = Printf.sprintf "To use this template from the CLI, install your VM using vm-install, then set other-config-install-repository to the path to your network repository, e.g. http://<server>/<path> or nfs:server:/<path>";
+      vM_other_config = [
+        disks_key, Xml.to_string (xml_of_disks [ root ]);
+	(install_methods_otherconfig_key, "cdrom,nfs,http,ftp")
+      ];
+      vM_platform = platform_flags;
+      vM_HVM_boot_params = [ Constants.hvm_boot_params_order, "cdn" ];
+      vM_HVM_shadow_multiplier = base.vM_HVM_shadow_multiplier;
+      vM_recommendations = (recommendations ~memory:max_memory_gib ~fields:[("allow-gpu-passthrough", "1"); ("allow-vgpu", "1")] ());
+      vM_generation_id = ""; 
+  }
 
 let sles10sp1_template name architecture ?(is_experimental=false) flags =
 	let maximum_supported_memory_gib = match architecture with
 		| X32 -> 16
 		| X64 -> 128 
-		| X64_sol | X64_debianlike -> assert false
+		| X64_debianlike -> assert false
 	in
 	let name = make_long_name name architecture is_experimental in
 	let install_arch = technical_string_of_architecture architecture in
@@ -520,27 +520,27 @@ let sles10sp1_template name architecture ?(is_experimental=false) flags =
 		vM_recommendations = recommendations ~memory:maximum_supported_memory_gib ~vifs:3 ();
 	}
 
-let sles10_template name architecture ?(is_experimental=false) flags =
+let sles10_template name architecture ?(is_experimental=false) ?(max_vcpus=32) flags =
 	let maximum_supported_memory_gib = match architecture with
 		| X32 -> 16
 		| X64 -> 128 
-		| X64_sol | X64_debianlike -> assert false
+		| X64_debianlike -> assert false
 	in
 	let name = make_long_name name architecture is_experimental in
 	let install_arch = technical_string_of_architecture architecture in
 	let bt = eli_install_template (default_memory_parameters 512L) name "sleslike" true "console=ttyS0 xencons=ttyS" in
 	{ bt with
 		vM_other_config = (install_methods_otherconfig_key, "cdrom,nfs,http,ftp") :: ("install-arch",install_arch) :: bt.vM_other_config;
-		vM_recommendations = recommendations ~memory:maximum_supported_memory_gib ();
+		vM_recommendations = recommendations ~memory:maximum_supported_memory_gib ~vcpus:max_vcpus ();
 	}
 
 let sles11_template = sles10_template
 
-let debian_template name release architecture ?(supports_cd=true) ?(is_experimental=false) ?(max_mem_gib=32) ?(max_vcpus=16) ?(cmdline="-- quiet console=hvc0") flags =
+let debian_template name release architecture ?(supports_cd=true) ?(is_experimental=false) ?(max_mem_gib=32) ?(max_vcpus=32) ?(cmdline="-- quiet console=hvc0") flags =
 	let maximum_supported_memory_gib = match architecture with
 		| X32 -> max_mem_gib
 		| X64_debianlike -> max_mem_gib
-		| X64_sol | X64 -> assert false
+		| X64 -> assert false
 	in
 	let name = make_long_name name architecture is_experimental in
 	let install_arch = technical_string_of_architecture architecture in
@@ -574,6 +574,8 @@ let create_all_templates rpc session_id =
 		rhel5x_template "Red Hat Enterprise Linux 5"   X64 [    ];
 		rhel5x_template "CentOS 5" X32 [    ];
 		rhel5x_template "CentOS 5" X64 [    ];
+		rhel5x_template "Scientific Linux 5" X32 [    ];
+		rhel5x_template "Scientific Linux 5" X64 [    ];
 		oracle_template "Oracle Enterprise Linux 5" X32 [    ];
 		oracle_template "Oracle Enterprise Linux 5" X64 [    ];
 		rhel6x_template "Red Hat Enterprise Linux 6"   X32 [    ];
@@ -582,29 +584,47 @@ let create_all_templates rpc session_id =
 		rhel6x_template "Oracle Enterprise Linux 6" X64 [    ];
 		rhel6x_template "CentOS 6" X32 [    ];
 		rhel6x_template "CentOS 6" X64 [    ];
-
+		rhel6x_template "Scientific Linux 6" X32 [    ];
+		rhel6x_template "Scientific Linux 6" X64 [    ];
+		hvm_linux_template "Red Hat Enterprise Linux 7" (GiB 1) (GiB 512)  (GiB 10);
+		hvm_linux_template "CentOS 7" (GiB 1) (GiB 512)  (GiB 10);
+		hvm_linux_template "Oracle Linux 7" (GiB 1) (GiB 512)  (GiB 10);
+		hvm_linux_template "Scientific Linux 7" (GiB 1) (GiB 512)  (GiB 10);
+		hvm_linux_template "Ubuntu Trusty Tahr 14.04" (MiB 512) (GiB 512)  (GiB 8);
+		hvm_linux_template "CoreOS" (MiB 512) (GiB 512) (GiB 5);
+		hvm_linux_template "Debian Jessie 8.0" (MiB 128) (GiB 512)  (GiB 8);
 		sles10sp1_template "SUSE Linux Enterprise Server 10 SP1" X32 [    ];
 		sles10_template    "SUSE Linux Enterprise Server 10 SP2" X32 [    ];
 		sles10_template    "SUSE Linux Enterprise Server 10 SP3" X32 [    ];
 		sles10_template    "SUSE Linux Enterprise Server 10 SP4" X32 [    ];
 		sles11_template    "SUSE Linux Enterprise Server 11"     X32 [    ];
 		sles11_template    "SUSE Linux Enterprise Server 11 SP1" X32 [    ];
+		sles11_template    "SUSE Linux Enterprise Server 11 SP2" X32 [    ];
+		sles11_template    "SUSE Linux Enterprise Server 11 SP3" X32 [    ];
 		sles10sp1_template "SUSE Linux Enterprise Server 10 SP1" X64 [    ];
 		sles10_template    "SUSE Linux Enterprise Server 10 SP2" X64 [    ];
 		sles10_template    "SUSE Linux Enterprise Server 10 SP3" X64 [    ];
 		sles10_template    "SUSE Linux Enterprise Server 10 SP4" X64 [    ];
 		sles11_template    "SUSE Linux Enterprise Server 11"     X64 [    ];
 		sles11_template    "SUSE Linux Enterprise Server 11 SP1" X64 [    ];
+		sles11_template    "SUSE Linux Enterprise Server 11 SP2" X64 [    ];
+		sles11_template    "SUSE Linux Enterprise Server 11 SP3" X64 [    ];
+		sles11_template    "SUSE Linux Enterprise Desktop 11 SP3" X64 [    ];
+		sles11_template    "SUSE Linux Enterprise Server 12"     X64 [    ];
+		sles11_template    "SUSE Linux Enterprise Desktop 12" X64 [    ];
 
-		debian_template "Debian Squeeze 6.0" "squeeze" X32 ~max_vcpus:32 [    ];
-		debian_template "Debian Squeeze 6.0" "squeeze" X64_debianlike ~max_mem_gib:70 ~max_vcpus:128 [    ];
-		debian_template "Ubuntu Lucid Lynx 10.04" "lucid" X32 ~supports_cd:false [    ];
+ 		debian_template "Debian Squeeze 6.0" "squeeze" X32 [    ];
+ 		debian_template "Debian Squeeze 6.0" "squeeze" X64_debianlike ~max_mem_gib:70 [    ];
+		debian_template "Debian Wheezy 7.0" "wheezy" X32 [    ];
+		debian_template "Debian Wheezy 7.0" "wheezy" X64_debianlike ~max_mem_gib:128 [    ];
+
+		debian_template "Ubuntu Lucid Lynx 10.04" "lucid" X32 ~supports_cd:false ~max_vcpus:8 [    ];
 		debian_template "Ubuntu Lucid Lynx 10.04" "lucid" X64_debianlike ~supports_cd:false [    ];
 
-		debian_template "Ubuntu Maverick Meerkat 10.10" "maverick" X32 ~supports_cd:false ~is_experimental:true [    ];
+		debian_template "Ubuntu Maverick Meerkat 10.10" "maverick" X32 ~max_vcpus:8 ~supports_cd:false ~is_experimental:true [    ];
 		debian_template "Ubuntu Maverick Meerkat 10.10" "maverick" X64_debianlike ~supports_cd:false ~is_experimental:true [    ];
-		debian_template "Ubuntu Precise Pangolin 12.04" "precise" X32 ~max_mem_gib:48 ~max_vcpus:8 ~cmdline:"-- quiet console=hvc0 d-i:base-installer/kernel/image=linux-generic-pae" [    ];
-		debian_template "Ubuntu Precise Pangolin 12.04" "precise" X64_debianlike ~max_mem_gib:128 ~max_vcpus:128 [    ];
+		debian_template "Ubuntu Precise Pangolin 12.04" "precise" X32 ~max_vcpus:8 ~cmdline:"-- quiet console=hvc0 d-i:base-installer/kernel/image=linux-generic-pae" [    ];
+		debian_template "Ubuntu Precise Pangolin 12.04" "precise" X64_debianlike ~max_mem_gib:128 [    ];
 	] in
 
 	let hvm_static_templates =
@@ -612,26 +632,30 @@ let create_all_templates rpc session_id =
 		let x = XenApp   in
 		let v = Viridian in
 		let s = StdVga   in
+		let u = WindowsUpdate in
 	[
 		other_install_media_template (default_memory_parameters 128L);
-		hvm_template "Windows XP SP3"             X32  256 16 [    v;] "";
-		hvm_template "Windows Vista"              X32 1024 24 [n;  v;] "0002";
-		hvm_template "Windows 7"                  X32 1024 24 [n;  v;] "0002";
-		hvm_template "Windows 7"                  X64 2048 24 [n;  v;] "0002";
-		hvm_template "Windows 8"                  X32 ~is_experimental:true 1024 24 [n;  v;  s;] "0002";
-		hvm_template "Windows 8"                  X64 ~is_experimental:true 2048 24 [n;  v;  s;] "0002";
-		hvm_template "Windows Server 2003"        X32  256 16 [    v;] "";
-		hvm_template "Windows Server 2003"        X32  256 16 [  x;v;] "";
-		hvm_template "Windows Server 2003"        X64  256 16 [n;  v;] "";
-		hvm_template "Windows Server 2003"        X64  256 16 [n;x;v;] "";
-		hvm_template "Windows Server 2008"        X32  512 24 [n;  v;] "0002";
-		hvm_template "Windows Server 2008"        X32  512 24 [n;x;v;] "0002";
-		hvm_template "Windows Server 2008"        X64  512 24 [n;  v;] "0002";
-		hvm_template "Windows Server 2008"        X64  512 24 [n;x;v;] "0002";
-		hvm_template "Windows Server 2008 R2"     X64  512 24 [n;  v;] "0002";
-		hvm_template "Windows Server 2008 R2"     X64  512 24 [n;x;v;] "0002";
-		hvm_template "Windows Server 2012"     	  X64 ~is_experimental:true 1024 24 [n;  v;  s;] "0002";
-		hvm_template "Solaris 10"                 X64_sol ~is_experimental:true 1024 24 [n;    ] "";
+		hvm_template "Windows XP SP3"             X32  256 16   4 [    v; ] "";
+		hvm_template "Windows Vista"              X32 1024 24   4 [n;  v;u] "0002";
+		hvm_template "Windows 7"                  X32 1024 24   4 [n;  v;u] "0002";
+		hvm_template "Windows 7"                  X64 2048 24 128 [n;  v;u] "0002";
+		hvm_template "Windows 8"                  ~generation_id:true X32 1024 24   4 [n;v;s;u] "0002";
+		hvm_template "Windows 8"                  ~generation_id:true X64 2048 24 128 [n;v;s;u] "0002";
+		hvm_template "Windows 10 Preview"         ~is_experimental:true ~generation_id:true X32 1024 24   4 [n;v;s;u] "0002";
+		hvm_template "Windows 10 Preview"         ~is_experimental:true ~generation_id:true X64 2048 24 128 [n;v;s;u] "0002";
+		hvm_template "Windows Server 2003"        X32  256 16  64 [    v; ] "";
+		hvm_template "Windows Server 2003"        X32  256 16  64 [  x;v; ] "";
+		hvm_template "Windows Server 2003"        X64  256 16 128 [n;  v; ] "";
+		hvm_template "Windows Server 2003"        X64  256 16 128 [n;x;v; ] "";
+		hvm_template "Windows Server 2008"        X32  512 24  64 [n;  v;u] "0002";
+		hvm_template "Windows Server 2008"        X32  512 24  64 [n;x;v;u] "0002";
+		hvm_template "Windows Server 2008"        X64  512 24 128 [n;  v;u] "0002";
+		hvm_template "Windows Server 2008"        X64  512 24 128 [n;x;v;u] "0002";
+		hvm_template "Windows Server 2008 R2"     X64  512 24 128 [n;  v;u] "0002";
+		hvm_template "Windows Server 2008 R2"     X64  512 24 128 [n;x;v;u] "0002";
+		hvm_template "Windows Server 2012"     	  ~generation_id:true X64 1024 32 128 [n;v;s;u] "0002";
+		hvm_template "Windows Server 2012 R2"     ~generation_id:true X64 1024 32 128 [n;v;s;u] "0002";
+		hvm_template "Windows Server 10 Preview"  ~is_experimental:true ~generation_id:true X64 1024 32 128 [n;v;s;u] "0002";
 	] in
 
 	(* put default_template key in static_templates other_config of static_templates: *)
@@ -643,11 +667,11 @@ let create_all_templates rpc session_id =
 		List.map (fun t -> {t with vM_other_config = default_template::linux_template::t.vM_other_config}) linux_static_templates in
 
 	(* Create the HVM templates *)
-	lwt () = Lwt_list.iter_p (fun x -> lwt _ = find_or_create_template x rpc session_id in Lwt.return ()) hvm_static_templates in
+	List.iter (fun x -> ignore(find_or_create_template x rpc session_id)) hvm_static_templates;
 
 	(* NB we now create the 'static' linux templates whether or not the 'linux pack' is 
 	   installed because these only depend on eliloader, which is always installed *)
-        lwt () = Lwt_list.iter_p (fun x -> lwt _ = find_or_create_template x rpc session_id in Lwt.return ()) linux_static_templates in
+	List.iter (fun x -> ignore(find_or_create_template x rpc session_id)) linux_static_templates;
 
 	(* The remaining template-creation functions determine whether they have the 
 	necessary resources (ISOs, networks) or not: *)
